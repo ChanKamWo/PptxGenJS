@@ -1,4 +1,4 @@
-/* PptxGenJS 4.0.0 @ 2025-05-04T15:19:14.634Z */
+/* PptxGenJS 4.0.0 @ 2025-05-19T17:00:17.502Z */
 import JSZip from 'jszip';
 
 /******************************************************************************
@@ -1136,20 +1136,36 @@ function getSlidesForTableRows(tableRows = [], tableProps = {}, presLayout, mast
     }
     // STEP 6: **MAIN** Iterate over rows, add table content, create new slides as rows overflow
     let newTableRowSlide = { rows: [] };
+    // activeRowSpans stores rowspan state.
+    // key is column index, cell is the spanning cell, remaining means how many more rows to span the cell
+    const activeRowSpans = new Map();
     tableRows.forEach((row, iRow) => {
+        var _a, _b, _c, _d, _e;
         // A: Row variables
         const rowCellLines = [];
         let maxCellMarTopEmu = 0;
         let maxCellMarBtmEmu = 0;
+        let activeCellIndex = 0;
         // B: Create new row in data model, calc `maxCellMar*`
         let currTableRow = [];
-        row.forEach(cell => {
-            var _a, _b, _c, _d;
+        for (let columnIndex = 0; columnIndex < numCols; ++columnIndex) {
+            const activeRowSpan = activeRowSpans.get(columnIndex);
+            const cell = activeRowSpan && activeRowSpan.activeRowIndex < iRow ? activeRowSpan.cell : row[activeCellIndex++];
+            if (!activeRowSpan && cell.options.rowspan) {
+                activeRowSpans.set(columnIndex, {
+                    activeRowIndex: iRow,
+                    cell,
+                    remaining: cell.options.rowspan,
+                });
+            }
             currTableRow.push({
                 _type: SLIDE_OBJECT_TYPES.tablecell,
                 text: [],
                 options: cell.options,
             });
+            if (activeRowSpan && activeRowSpan.activeRowIndex < iRow) {
+                continue;
+            }
             /** FUTURE: DEPRECATED:
              * - Backwards-Compat: Oops! Discovered we were still using points for cell margin before v3.8.0 (UGH!)
              * - We cant introduce a breaking change before v4.0, so...
@@ -1174,19 +1190,21 @@ function getSlidesForTableRows(tableRows = [], tableProps = {}, presLayout, mast
                 else if ((tableProps === null || tableProps === void 0 ? void 0 : tableProps.margin) && tableProps.margin[2] && inch2Emu(tableProps.margin[2]) > maxCellMarBtmEmu)
                     maxCellMarBtmEmu = inch2Emu(tableProps.margin[2]);
             }
-        });
+        }
         // C: Calc usable vertical space/table height. Set default value first, adjust below when necessary.
         calcSlideTabH();
         emuTabCurrH += maxCellMarTopEmu + maxCellMarBtmEmu; // Start row height with margins
         if (tableProps.verbose && iRow === 0)
             console.log(`| SLIDE [${tableRowSlides.length}]: emuSlideTabH ...... = ${(emuSlideTabH / EMU).toFixed(1)} `);
         // D: --==[[ BUILD DATA SET ]]==-- (iterate over cells: split text into lines[], set `lineHeight`)
-        row.forEach((cell, iCell) => {
-            var _a;
+        activeCellIndex = 0;
+        for (let columnIndex = 0; columnIndex < numCols; ++columnIndex) {
+            const activeRowSpan = activeRowSpans.get(columnIndex);
+            const cell = activeRowSpan && activeRowSpan.activeRowIndex < iRow ? activeRowSpan.cell : row[activeCellIndex++];
             const newCell = {
                 _type: SLIDE_OBJECT_TYPES.tablecell,
                 _lines: null,
-                _lineHeight: inch2Emu(((((_a = cell.options) === null || _a === void 0 ? void 0 : _a.fontSize) ? cell.options.fontSize : tableProps.fontSize ? tableProps.fontSize : DEF_FONT_SIZE) *
+                _lineHeight: inch2Emu(((((_e = cell.options) === null || _e === void 0 ? void 0 : _e.fontSize) ? cell.options.fontSize : tableProps.fontSize ? tableProps.fontSize : DEF_FONT_SIZE) *
                     (LINEH_MODIFIER + (tableProps.autoPageLineWeight ? tableProps.autoPageLineWeight : 0))) /
                     100),
                 text: [],
@@ -1198,15 +1216,15 @@ function getSlidesForTableRows(tableRows = [], tableProps = {}, presLayout, mast
             // E-2: The parseTextToLines method uses `autoPageCharWeight`, so inherit from table options
             newCell.options.autoPageCharWeight = tableProps.autoPageCharWeight ? tableProps.autoPageCharWeight : null;
             // E-3: **MAIN** Parse cell contents into lines based upon col width, font, etc
-            let totalColW = tableProps.colW[iCell];
+            let totalColW = tableProps.colW[columnIndex];
             if (cell.options.colspan && Array.isArray(tableProps.colW)) {
-                totalColW = tableProps.colW.filter((_cell, idx) => idx >= iCell && idx < idx + cell.options.colspan).reduce((prev, curr) => prev + curr);
+                totalColW = tableProps.colW.filter((_cell, idx) => idx >= columnIndex && idx < idx + cell.options.colspan).reduce((prev, curr) => prev + curr);
             }
             // E-4: Create lines based upon available column width
-            newCell._lines = parseTextToLines(cell, totalColW);
+            newCell._lines = activeRowSpan && activeRowSpan.activeRowIndex < iRow ? [] : parseTextToLines(cell, totalColW);
             // E-5: Add cell to array
             rowCellLines.push(newCell);
-        });
+        }
         /** E: --==[[ PAGE DATA SET ]]==--
          * Add text one-line-a-time to this row's cells until: lines are exhausted OR table height limit is hit
          *
@@ -1249,6 +1267,19 @@ function getSlidesForTableRows(tableRows = [], tableProps = {}, presLayout, mast
         let currCellIdx = 0;
         let emuLineMaxH = 0;
         let isDone = false;
+        function flushCurrentRowToSlide(tableSlide, rowToAdd) {
+            const tableHeaderRowsCount = (tableProps.addHeaderToEach || tableProps.autoPageRepeatHeader) && tableProps._arrObjTabHeadRows ? tableProps._arrObjTabHeadRows.length : 0;
+            if (tableSlide.rows.length === tableHeaderRowsCount) {
+                tableSlide.rows.push(rowToAdd);
+            }
+            else {
+                const rowsToAdd = rowToAdd.filter((_, idx) => {
+                    const activeSpan = activeRowSpans.get(idx);
+                    return !(activeSpan && activeSpan.activeRowIndex < iRow);
+                });
+                tableSlide.rows.push(rowsToAdd);
+            }
+        }
         while (!isDone) {
             const srcCell = rowCellLines[currCellIdx];
             let tgtCell = currTableRow[currCellIdx]; // NOTE: may be redefined below (a new row may be created, thus changing this value)
@@ -1267,7 +1298,7 @@ function getSlidesForTableRows(tableRows = [], tableProps = {}, presLayout, mast
                 }
                 // A: add current row slide or it will be lost (only if it has rows and text)
                 if (currTableRow.length > 0 && currTableRow.map(cell => cell.text.length).reduce((p, n) => p + n) > 0)
-                    newTableRowSlide.rows.push(currTableRow);
+                    flushCurrentRowToSlide(newTableRowSlide, currTableRow);
                 // B: add current slide to Slides array
                 tableRowSlides.push(newTableRowSlide);
                 // C: reset working/curr slide to hold rows as they're created
@@ -1275,7 +1306,20 @@ function getSlidesForTableRows(tableRows = [], tableProps = {}, presLayout, mast
                 newTableRowSlide = { rows: newRows };
                 // D: reset working/curr row
                 currTableRow = [];
-                row.forEach(cell => currTableRow.push({ _type: SLIDE_OBJECT_TYPES.tablecell, text: [], options: cell.options }));
+                activeCellIndex = 0;
+                for (let columnIndex = 0; columnIndex < numCols; ++columnIndex) {
+                    const activeRowSpan = activeRowSpans.get(columnIndex);
+                    const cell = activeRowSpan && activeRowSpan.activeRowIndex < iRow ? activeRowSpan.cell : row[activeCellIndex++];
+                    currTableRow.push({
+                        _type: SLIDE_OBJECT_TYPES.tablecell,
+                        text: [],
+                        options: Object.assign(Object.assign({}, cell.options), (cell.options.rowspan
+                            ? {
+                                rowspan: activeRowSpan.remaining,
+                            }
+                            : {})),
+                    });
+                }
                 // E: Calc usable vertical space/table height now as we may still be in the same row and code above ("C: Calc usable vertical space/table height.") calc may now be invalid
                 calcSlideTabH();
                 emuTabCurrH += maxCellMarTopEmu + maxCellMarBtmEmu; // Start row height with margins
@@ -1311,10 +1355,10 @@ function getSlidesForTableRows(tableRows = [], tableProps = {}, presLayout, mast
                 // IMPORTANT: ^^^ add empty if there are no words to avoid "needs repair" issue triggered when cells have null content
             }
             // 5: increase table height by the curr line height (if we're on the last column)
-            if (currCellIdx === rowCellLines.length - 1)
+            if (currCellIdx === numCols - 1)
                 emuTabCurrH += emuLineMaxH;
             // 6: advance column/cell index (or circle back to first one to continue adding lines)
-            currCellIdx = currCellIdx < rowCellLines.length - 1 ? currCellIdx + 1 : 0;
+            currCellIdx = currCellIdx < numCols - 1 ? currCellIdx + 1 : 0;
             // 7: done?
             const brent = rowCellLines.map(cell => cell._lines.length).reduce((prev, next) => prev + next);
             if (brent === 0)
@@ -1322,7 +1366,16 @@ function getSlidesForTableRows(tableRows = [], tableProps = {}, presLayout, mast
         }
         // F: Flush/capture row buffer before it resets at the top of this loop
         if (currTableRow.length > 0)
-            newTableRowSlide.rows.push(currTableRow);
+            flushCurrentRowToSlide(newTableRowSlide, currTableRow);
+        // update activeRowSpans
+        const rowSpanColumns = Array.from(activeRowSpans.keys());
+        rowSpanColumns.forEach(columnIndex => {
+            const rowSpan = activeRowSpans.get(columnIndex);
+            rowSpan.remaining--;
+            if (rowSpan.remaining === 0) {
+                activeRowSpans.delete(columnIndex);
+            }
+        });
         if (tableProps.verbose) {
             console.log(`- SLIDE [${tableRowSlides.length}]: ROW [${iRow}]: ...COMPLETE ...... emuTabCurrH = ${(emuTabCurrH / EMU).toFixed(2)} ( emuSlideTabH = ${(emuSlideTabH / EMU).toFixed(2)} )`);
         }
